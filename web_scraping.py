@@ -286,7 +286,7 @@ if st.session_state['reviews']:
             }
         )
 
-        text_columns = ['review_text', 'author'] # укажите ваши колонки с отзывами
+        text_columns = ['author', 'title', 'content'] # укажите ваши колонки с отзывами
         for col in text_columns:
             if col in df_display.columns:
                 df_display[col] = df_display[col].apply(
