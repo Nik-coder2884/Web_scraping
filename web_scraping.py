@@ -286,9 +286,6 @@ if st.session_state['reviews']:
             }
         )
 
-
-
-
 def prepare_csv_data(reviews: List[Dict[str, Any]]) -> pd.DataFrame:
     """Подготавливает DataFrame для выгрузки и отображения."""
     if not reviews:
@@ -319,13 +316,6 @@ def prepare_csv_data(reviews: List[Dict[str, Any]]) -> pd.DataFrame:
             
     return df
 
-        
-
-
-
-
-
-        
         # Подготовка CSV для скачивания
         csv_data = df_display.to_csv(index=False, encoding='utf-8-sig', sep=';')
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
