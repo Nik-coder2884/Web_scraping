@@ -10,19 +10,24 @@ from urllib3.util.retry import Retry
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Set, Tuple
 
-# --- Конфигурация страницы ---
-st.set_page_config(
-    page_title="🍎 Парсер отзывов App Store",
-    page_icon="📱",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
 
-st.title("📱 Парсер отзывов App Store")
-st.caption("Инструмент собирает отзывы через официальное API Apple, фильтрует их и позволяет скачать в CSV.")
+# --- Вспомогательные функции ---
 
+def fix_encoding(text: Any) -> Any:
+    """
+    Исправляет двойное кодирование (когда UTF-8 байты прочитаны как cp1251).
+    Пример: 'РЎР»РёС€РєРѕм' -> 'Слишком'
+    """
+    if not isinstance(text, str):
+        return text
+    try:
+        # Если в строке есть не-ASCII символы, пробуем восстановить кодировку
+        if any(ord(c) > 127 for c in text):
+            return text.encode('cp1251', errors='ignore').decode('utf-8', errors='ignore')
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        pass
+    return text
 
-# --- Ядро логики (без сайд-эффектов) ---
 
 @st.cache_resource
 def setup_session() -> requests.Session:
@@ -42,7 +47,8 @@ def setup_session() -> requests.Session:
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
         'Accept': 'application/json',
-        'Referer': 'https://apps.apple.com/'
+        'Referer': 'https://apps.apple.com/',
+        'Accept-Charset': 'utf-8'
     })
     return session
 
@@ -94,13 +100,13 @@ def parse_review_entry(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             'votes': votes,
             'review_url': review_url
         }
-    except Exception as e:
+    except Exception:
         return None
 
 
 @st.cache_data(show_spinner=False)
 def fetch_reviews(app_id: str, target_limit: int = 50) -> List[Dict[str, Any]]:
-    """Собирает отзывы через API. Кэшируется, чтобы не дергать API при смене сортировки."""
+    """Собирает отзывы через API."""
     session = setup_session()
     reviews = []
     seen_reviews: Set[Tuple[str, str, str]] = set()
@@ -122,7 +128,12 @@ def fetch_reviews(app_id: str, target_limit: int = 50) -> List[Dict[str, Any]]:
                 break
 
             response.raise_for_status()
-            data = response.json()
+
+            # Надежное декодирование JSON
+            try:
+                data = response.json()
+            except json.JSONDecodeError:
+                data = json.loads(response.content.decode('utf-8', errors='replace'))
 
             entries = data.get('feed', {}).get('entry', [])
             if isinstance(entries, dict):
@@ -138,6 +149,12 @@ def fetch_reviews(app_id: str, target_limit: int = 50) -> List[Dict[str, Any]]:
                 parsed = parse_review_entry(entry)
                 if not parsed:
                     continue
+
+                # Применяем исправление кодировки к сырым строкам сразу после парсинга
+                parsed['author'] = fix_encoding(parsed['author'])
+                parsed['title'] = fix_encoding(parsed['title'])
+                parsed['content'] = fix_encoding(parsed['content'])
+                parsed['version'] = fix_encoding(parsed['version'])
 
                 text_for_check = (parsed['content'] + ' ' + parsed['title']).lower()
                 if not re.search(r'[а-яё]', text_for_check):
@@ -156,7 +173,6 @@ def fetch_reviews(app_id: str, target_limit: int = 50) -> List[Dict[str, Any]]:
 
             page += 1
 
-            # Обновление прогресса
             progress = min(1.0, len(reviews) / target_limit)
             progress_bar.progress(progress)
             progress_text.text(f"Загружено {len(reviews)} из {target_limit} отзывов...")
@@ -203,22 +219,33 @@ def prepare_csv_data(reviews: List[Dict[str, Any]]) -> pd.DataFrame:
     df = pd.DataFrame(reviews)
     df = df[columns]
 
-    # Очистка переносов строк для корректного отображения в DataFrame и CSV
+    # Очистка переносов строк и финальная проверка кодировки
     for col in ['author', 'title', 'content', 'version']:
         if col in df.columns:
             df[col] = df[col].astype(str).str.replace('\n', ' ').str.replace('\r', ' ')
+            df[col] = df[col].apply(fix_encoding)
+            
     return df
 
 
 # --- Интерфейс Streamlit ---
 
-# Инициализация состояния
 if 'app_id' not in st.session_state:
     st.session_state['app_id'] = None
 if 'reviews' not in st.session_state:
     st.session_state['reviews'] = []
 if 'sort_mode' not in st.session_state:
     st.session_state['sort_mode'] = 'newest'
+
+st.set_page_config(
+    page_title="🍎 Парсер отзывов App Store",
+    page_icon="📱",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
+st.title("📱 Парсер отзывов App Store")
+st.caption("Инструмент собирает отзывы через официальное API Apple, фильтрует их и позволяет скачать в CSV.")
 
 with st.form("input_form"):
     app_url = st.text_input(
@@ -251,14 +278,13 @@ if submitted:
             st.session_state['reviews'] = raw_reviews
             st.rerun()
 
-# Блок сортировки и отображения
 if st.session_state['reviews']:
     st.divider()
 
     col_sort, _ = st.columns([1, 4])
     with col_sort:
         sort_choice = st.selectbox(
-            "📊 Сортировка (применяется к уже собранным данным)",
+            "📊 Сортировка",
             options=['newest', 'useful', 'critical', 'positive'],
             index=0,
             format_func=lambda x: {
@@ -286,37 +312,7 @@ if st.session_state['reviews']:
             }
         )
 
-def prepare_csv_data(reviews: List[Dict[str, Any]]) -> pd.DataFrame:
-    """Подготавливает DataFrame для выгрузки и отображения."""
-    if not reviews:
-        return pd.DataFrame()
-
-    columns = ['author', 'title', 'content', 'rating', 'version', 'date', 'votes', 'review_url']
-    df = pd.DataFrame(reviews)
-    df = df[columns]
-
-    # Функция для исправления двойного кодирования (cp1251 -> utf-8)
-    def fix_encoding(text: str) -> str:
-        if not isinstance(text, str):
-            return text
-        try:
-            # Если строка содержит "кракозябры", пробуем восстановить
-            if any(ord(c) > 127 for c in text):
-                return text.encode('cp1251', errors='ignore').decode('utf-8', errors='ignore')
-        except Exception:
-            pass
-        return text
-
-    # Применяем исправление ко всем текстовым колонкам
-    for col in ['author', 'title', 'content', 'version']:
-        if col in df.columns:
-            # Сначала убираем переносы, потом чиним кодировку
-            df[col] = df[col].astype(str).str.replace('\n', ' ').str.replace('\r', ' ')
-            df[col] = df[col].apply(fix_encoding)
-            
-    return df
-
-        # Подготовка CSV для скачивания
+        # Блок скачивания (на правильном уровне отступа)
         csv_data = df_display.to_csv(index=False, encoding='utf-8-sig', sep=';')
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f"reviews_{st.session_state['app_id']}_{timestamp}.csv"
