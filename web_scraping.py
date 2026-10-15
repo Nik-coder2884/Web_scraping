@@ -286,6 +286,14 @@ if st.session_state['reviews']:
             }
         )
 
+        text_columns = ['review_text', 'author'] # укажите ваши колонки с отзывами
+        for col in text_columns:
+            if col in df_display.columns:
+                df_display[col] = df_display[col].apply(
+                    lambda x: x.encode('cp1251', errors='ignore').decode('utf-8', errors='ignore')
+                    if isinstance(x, str) else x
+                )
+        
         # Подготовка CSV для скачивания
         csv_data = df_display.to_csv(index=False, encoding='utf-8-sig', sep=';')
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
