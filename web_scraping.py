@@ -10,6 +10,17 @@ from urllib3.util.retry import Retry
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Set, Tuple
 
+# --- Конфигурация страницы ---
+st.set_page_config(
+    page_title="🍎 Парсер отзывов App Store",
+    page_icon="📱",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
+st.title("📱 Парсер отзывов App Store")
+st.caption("Инструмент собирает отзывы через официальное API Apple, фильтрует их и позволяет скачать в CSV.")
+
 
 # --- Вспомогательные функции ---
 
@@ -21,7 +32,6 @@ def fix_encoding(text: Any) -> Any:
     if not isinstance(text, str):
         return text
     try:
-        # Если в строке есть не-ASCII символы, пробуем восстановить кодировку
         if any(ord(c) > 127 for c in text):
             return text.encode('cp1251', errors='ignore').decode('utf-8', errors='ignore')
     except (UnicodeDecodeError, UnicodeEncodeError):
@@ -31,7 +41,6 @@ def fix_encoding(text: Any) -> Any:
 
 @st.cache_resource
 def setup_session() -> requests.Session:
-    """Настраивает сессию с retry-механизмом и заголовками браузера."""
     session = requests.Session()
     retry_strategy = Retry(
         total=5,
@@ -43,6 +52,7 @@ def setup_session() -> requests.Session:
     session.mount("https://", adapter)
     session.mount("http://", adapter)
 
+    # Базовый десктопный User-Agent
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
@@ -106,7 +116,7 @@ def parse_review_entry(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 @st.cache_data(show_spinner=False)
 def fetch_reviews(app_id: str, target_limit: int = 50) -> List[Dict[str, Any]]:
-    """Собирает отзывы через API."""
+    """Собирает отзывы через API с учетом новой структуры JSON и защиты Apple."""
     session = setup_session()
     reviews = []
     seen_reviews: Set[Tuple[str, str, str]] = set()
@@ -118,24 +128,34 @@ def fetch_reviews(app_id: str, target_limit: int = 50) -> List[Dict[str, Any]]:
     progress_bar = st.progress(0)
 
     while len(reviews) < target_limit:
-        time.sleep(random.uniform(2.0, 4.0))
+        time.sleep(random.uniform(3.0, 5.0))
         params = {'page': page, 'l': 'ru'}
 
         try:
-            response = session.get(url, params=params, timeout=15)
+            response = session.get(url, params=params, timeout=20)
+
+            # Если Apple вернул HTML (защита от ботов), меняем User-Agent на мобильный и пробуем снова
             if 'text/html' in response.headers.get('Content-Type', ''):
-                st.error("Apple вернул HTML вместо JSON. Возможно, сработала защита от ботов.")
-                break
+                session.headers.update({
+                    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+                })
+                response = session.get(url, params=params, timeout=20)
 
             response.raise_for_status()
 
-            # Надежное декодирование JSON
+            # Гарантированное декодирование JSON
             try:
                 data = response.json()
             except json.JSONDecodeError:
-                data = json.loads(response.content.decode('utf-8', errors='replace'))
+                data = json.loads(response.content.decode('utf-8-sig', errors='replace'))
 
-            entries = data.get('feed', {}).get('entry', [])
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Apple часто возвращает список в ключе 'results'
+            entries = data.get('feed', {}).get('results', [])
+            
+            # Fallback на старую структуру 'entry', если 'results' пуст
+            if not entries:
+                entries = data.get('feed', {}).get('entry', [])
+                
             if isinstance(entries, dict):
                 entries = [entries]
 
@@ -150,12 +170,7 @@ def fetch_reviews(app_id: str, target_limit: int = 50) -> List[Dict[str, Any]]:
                 if not parsed:
                     continue
 
-                # Применяем исправление кодировки к сырым строкам сразу после парсинга
-                parsed['author'] = fix_encoding(parsed['author'])
-                parsed['title'] = fix_encoding(parsed['title'])
-                parsed['content'] = fix_encoding(parsed['content'])
-                parsed['version'] = fix_encoding(parsed['version'])
-
+                # Проверка на кириллицу (отфильтровывает отзывы на других языках)
                 text_for_check = (parsed['content'] + ' ' + parsed['title']).lower()
                 if not re.search(r'[а-яё]', text_for_check):
                     continue
@@ -177,9 +192,11 @@ def fetch_reviews(app_id: str, target_limit: int = 50) -> List[Dict[str, Any]]:
             progress_bar.progress(progress)
             progress_text.text(f"Загружено {len(reviews)} из {target_limit} отзывов...")
 
-        except requests.exceptions.RequestException:
+        except requests.exceptions.RequestException as e:
+            st.error(f"Ошибка сети: {e}")
             break
         except json.JSONDecodeError:
+            st.error("Ошибка парсинга JSON.")
             break
 
     progress_text.empty()
@@ -211,7 +228,6 @@ def filter_and_sort_reviews(reviews: List[Dict[str, Any]], sort_mode: str) -> Li
 
 
 def prepare_csv_data(reviews: List[Dict[str, Any]]) -> pd.DataFrame:
-    """Подготавливает DataFrame для выгрузки и отображения."""
     if not reviews:
         return pd.DataFrame()
 
@@ -219,7 +235,6 @@ def prepare_csv_data(reviews: List[Dict[str, Any]]) -> pd.DataFrame:
     df = pd.DataFrame(reviews)
     df = df[columns]
 
-    # Очистка переносов строк и финальная проверка кодировки
     for col in ['author', 'title', 'content', 'version']:
         if col in df.columns:
             df[col] = df[col].astype(str).str.replace('\n', ' ').str.replace('\r', ' ')
@@ -236,16 +251,6 @@ if 'reviews' not in st.session_state:
     st.session_state['reviews'] = []
 if 'sort_mode' not in st.session_state:
     st.session_state['sort_mode'] = 'newest'
-
-st.set_page_config(
-    page_title="🍎 Парсер отзывов App Store",
-    page_icon="📱",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
-
-st.title("📱 Парсер отзывов App Store")
-st.caption("Инструмент собирает отзывы через официальное API Apple, фильтрует их и позволяет скачать в CSV.")
 
 with st.form("input_form"):
     app_url = st.text_input(
@@ -312,7 +317,6 @@ if st.session_state['reviews']:
             }
         )
 
-        # Блок скачивания (на правильном уровне отступа)
         csv_data = df_display.to_csv(index=False, encoding='utf-8-sig', sep=';')
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f"reviews_{st.session_state['app_id']}_{timestamp}.csv"
