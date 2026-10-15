@@ -286,6 +286,46 @@ if st.session_state['reviews']:
             }
         )
 
+
+
+
+def prepare_csv_data(reviews: List[Dict[str, Any]]) -> pd.DataFrame:
+    """Подготавливает DataFrame для выгрузки и отображения."""
+    if not reviews:
+        return pd.DataFrame()
+
+    columns = ['author', 'title', 'content', 'rating', 'version', 'date', 'votes', 'review_url']
+    df = pd.DataFrame(reviews)
+    df = df[columns]
+
+    # Функция для исправления двойного кодирования (cp1251 -> utf-8)
+    def fix_encoding(text: str) -> str:
+        if not isinstance(text, str):
+            return text
+        try:
+            # Если строка содержит "кракозябры", пробуем восстановить
+            if any(ord(c) > 127 for c in text):
+                return text.encode('cp1251', errors='ignore').decode('utf-8', errors='ignore')
+        except Exception:
+            pass
+        return text
+
+    # Применяем исправление ко всем текстовым колонкам
+    for col in ['author', 'title', 'content', 'version']:
+        if col in df.columns:
+            # Сначала убираем переносы, потом чиним кодировку
+            df[col] = df[col].astype(str).str.replace('\n', ' ').str.replace('\r', ' ')
+            df[col] = df[col].apply(fix_encoding)
+            
+    return df
+
+        
+
+
+
+
+
+        
         # Подготовка CSV для скачивания
         csv_data = df_display.to_csv(index=False, encoding='utf-8-sig', sep=';')
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
